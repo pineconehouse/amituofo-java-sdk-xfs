@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<groupId>com.amituofo</groupId>
+	<artifactId>amituofo-java-sdk-xfs</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<packaging>pom</packaging>
+	<modules>
+		<module>amituofo-java-sdk-xfs-core</module>
+		<module>amituofo-java-sdk-xfs-ftp</module>
+		<module>amituofo-java-sdk-xfs-objectstorage-core</module>
+		<module>amituofo-java-sdk-xfs-objectstorage-hcp</module>
+		<module>amituofo-java-sdk-xfs-objectstorage-s3</module>
+		<module>amituofo-java-sdk-xfs-objectstorage-backblaze-b2</module>
+		<module>amituofo-java-sdk-xfs-objectstorage-google-cloud</module>
+		<module>amituofo-java-sdk-xfs-objectstorage-azure</module>
+		<module>amituofo-java-sdk-xfs-objectstorage-openstack-swift</module>
+		<module>amituofo-java-sdk-xfs-sftp</module>
+		<module>amituofo-java-sdk-xfs-memory</module>
+		<module>amituofo-java-sdk-xfs-hadoop</module>
+		<module>amituofo-java-sdk-xfs-virtual</module>
+		<module>amituofo-java-sdk-xfs-webdav</module>
+		<module>amituofo-java-sdk-xfs-smb-cifs</module>
+    <module>amituofo-java-sdk-xfs-onedrive</module>
+    <module>amituofo-java-sdk-xfs-tftp</module>
+  </modules>
+</project>

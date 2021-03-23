@@ -1,0 +1,46 @@
+package com.hitachivantara.xfs.plugin.fs.hdfs;
+
+public class HDFSClientFactory {
+	private static HDFSClientFactory instance = new HDFSClientFactory();
+
+	private HDFSClientFactory() {
+		// TODO Auto-generated constructor stub
+	}
+	
+	public static HDFSClientFactory getInstance() {
+		return instance;
+	}
+	
+	/**
+	 * 获取文件系统
+	 * 
+	 * @return FileSystem
+	 */
+//	public org.apache.hadoop.fs.FileSystem getFileSystem() {
+//	    //读取配置文件
+//	    Configuration conf = new Configuration();
+//	    // 文件系统
+//	    org.apache.hadoop.fs.FileSystem fs = null;
+//	    
+//	    String hdfsUri = "hdfs://10.49.85.152:9000";
+//	    if(StringUtils.isEmpty(hdfsUri)){
+//	        // 返回默认文件系统  如果在 Hadoop集群下运行，使用此种方法可直接获取默认文件系统
+//	        try {
+//	            fs = org.apache.hadoop.fs.FileSystem.get(conf);
+//	        } catch (IOException e) {
+////	            logger.error("", e);
+//	        }
+//	    }else{
+//	        // 返回指定的文件系统,如果在本地测试，需要使用此种方法获取文件系统
+//	        try {
+//	            URI uri = new URI(hdfsUri.trim());
+//	            fs = org.apache.hadoop.fs.FileSystem.get(uri,conf);
+//	        } catch (URISyntaxException | IOException e) {
+////	            logger.error("", e);
+//	        }
+//	    }
+//	        
+//	    return fs;
+//	}
+
+}

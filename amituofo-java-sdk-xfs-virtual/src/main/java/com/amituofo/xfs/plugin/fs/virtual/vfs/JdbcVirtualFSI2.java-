@@ -1,0 +1,723 @@
+package com.hitachivantara.xfs.plugin.fs.virtual.vfs;
+
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
+
+import javax.sql.DataSource;
+
+import com.hitachivantara.common.define.HandleFeedback;
+import com.hitachivantara.common.util.DigestUtils;
+import com.hitachivantara.common.util.StringUtils;
+import com.hitachivantara.core.http.util.URLUtils;
+import com.hitachivantara.xfs.plugin.fs.virtual.VirtualFileSystemEntry;
+import com.hitachivantara.xfs.plugin.fs.virtual.item.VirtualFileItem;
+import com.hitachivantara.xfs.plugin.fs.virtual.item.VirtualFolderItem;
+import com.hitachivantara.xfs.plugin.fs.virtual.vfsi.DefaultVirtualFSI;
+import com.hitachivantara.xfs.plugin.fs.virtual.vfsi.VirtualFSI;
+import com.hitachivantara.xfs.plugin.fs.virtual.vfsi.VirtualFileSystemException;
+import com.hitachivantara.xfs.plugin.fs.virtual.vfsi.VirtualFileSystemMaster;
+import com.hitachivantara.xfs.service.Item;
+import com.hitachivantara.xfs.service.ItemEvent;
+import com.hitachivantara.xfs.service.ItemHandler;
+import com.hitachivantara.xfs.service.ItemInnerFunc;
+import com.hitachivantara.xfs.service.ItemType;
+
+public abstract class JdbcVirtualFSI2 extends DefaultVirtualFSI {
+
+	private Connection conn;
+	protected String TABLE_NAME;
+	private final DataSource ds;
+
+	public JdbcVirtualFSI2(String fsid, VirtualFileSystemEntry fileSystemEntry, String folderPath, String dbname) {
+		super(fsid, fileSystemEntry, folderPath);
+		if (StringUtils.isNotEmpty(dbname)) {
+			this.TABLE_NAME = dbname + ".FT_" + DigestUtils.calcMD5ToHex(folderPath);
+		} else {
+			this.TABLE_NAME = "FT_" + DigestUtils.calcMD5ToHex(folderPath);
+		}
+
+		ds = null;
+	}
+
+	public JdbcVirtualFSI2(String fsid, VirtualFileSystemEntry fileSystemEntry, String folderPath, String dbname, DataSource ds) {
+		super(fsid, fileSystemEntry, folderPath);
+		if (StringUtils.isNotEmpty(dbname)) {
+			this.TABLE_NAME = dbname + ".FT_" + DigestUtils.calcMD5ToHex(folderPath);
+		} else {
+			this.TABLE_NAME = "FT_" + DigestUtils.calcMD5ToHex(folderPath);
+		}
+
+		this.ds = ds;
+	}
+
+	protected abstract Connection newConnection() throws VirtualFileSystemException;
+
+	protected Connection getConnection() {
+		lock();
+
+		if (this.conn != null) {
+			return conn;
+		}
+
+		if (ds == null) {
+			try {
+				this.conn = newConnection();
+			} catch (VirtualFileSystemException e) {
+				e.printStackTrace();
+			}
+		} else {
+			try {
+				this.conn = ds.getConnection();
+			} catch (SQLException e) {
+				e.printStackTrace();
+			}
+		}
+
+		return conn;
+	}
+
+	@Override
+	public void init() throws VirtualFileSystemException {
+		getConnection();
+		createTable();
+	}
+
+	@Override
+	public void close() {
+		if (lock()) {
+			if (conn != null) {
+				try {
+					this.conn.close();
+					// this.unlock();
+				} catch (Exception e) {
+				}
+			}
+			this.conn = null;
+			// System.out.println("Closed " + dblocation);
+			unlock();
+		} else {
+			// System.out.println("Unable close " + dblocation);
+		}
+	}
+
+	@Override
+	public VirtualFolderItem getFolderItem() {
+		return thisFolderItem;
+	}
+
+	protected void createTable() throws VirtualFileSystemException {
+		Statement stat = null;
+		try {
+			stat = getConnection().createStatement();
+			// stat.executeUpdate("DROP TABLE IF EXISTS "+tableName+"");
+			stat.executeUpdate("CREATE TABLE IF NOT EXISTS " + TABLE_NAME + "("
+			// + "FILE_ID BIGINT PRIMARY KEY, "
+					+ "FNAME VARCHAR(500) NOT NULL, "
+					+ "FTYPE CHAR(1) , "
+					+ "SIZE BIGINT, "
+					+ "CREATION_TIME BIGINT, "
+					+ "LAST_MODIFIED_TIME BIGINT, "
+					+ "CONTENT VARCHAR(100), "
+					+ "PRIMARY KEY (FNAME)"
+					+ ")");
+		} catch (SQLException e) {
+			throw new VirtualFileSystemException(e);
+		} finally {
+			closeAndCommit(stat);
+		}
+	}
+
+	// @Override
+	// public void clear() throws VirtualFileSystemException {
+	// lastUpdatetime = System.currentTimeMillis();
+	// Statement stat = null;
+	// try {
+	// stat = getConnection().createStatement();
+	// stat.executeUpdate("TRUNCATE TABLE " + TABLE_NAME + "");
+	// } catch (SQLException e) {
+	// throw new VirtualFileSystemException(e);
+	// } finally {
+	// closeAndCommit(stat);
+	// }
+	// }
+
+	@Override
+	public boolean delete(String filename, ItemType type) throws VirtualFileSystemException {
+		lastUpdatetime = System.currentTimeMillis();
+
+		Statement stat = null;
+		try {
+			stat = getConnection().createStatement();
+
+			char tp = (type == ItemType.Directory ? 'D' : 'F');
+			String sql = "DELETE FROM " + TABLE_NAME + " WHERE FTYPE='" + tp + "' AND FNAME='" + StringUtils.encodeBase64String(filename) + "'";
+
+			int c = stat.executeUpdate(sql);
+
+			//
+			if (type == ItemType.Directory) {
+				String folderPath = URLUtils.catPath(thisFolderPath, filename, memFileSystemEntry.getSeparatorChar());
+				System.out.println("-Debug- delete folder " + folderPath);
+				virtualFileSystem.cleanAndDeleteVirtualFSI(folderPath);
+			}
+
+			return c == 1;
+		} catch (SQLException e) {
+			throw new VirtualFileSystemException(e);
+		} finally {
+			closeAndCommit(stat);
+		}
+	}
+
+	@Override
+	public void newFile(String filename, long length, long createTime) throws VirtualFileSystemException {
+		lastUpdatetime = System.currentTimeMillis();
+
+		int c = 0;
+		Statement stat = null;
+		try {
+			stat = getConnection().createStatement();
+
+			StringBuilder buf = new StringBuilder();
+
+			// System.out.println(super.getId()+" "+fileItem.getPath()+" id="+calcItemId(folderHash, folderLen, fileItem)+">> parent="+parent+"
+			// folderHash="+folderHash+" folderLen="+folderLen+" fileNameHash="+fileItem.getName().toLowerCase().hashCode());
+
+			buf.append("INSERT INTO " + TABLE_NAME + " VALUES(");
+			buf.append("'");
+			buf.append(StringUtils.encodeBase64String(filename)); // FNAME
+			buf.append("', 'F', ");
+			buf.append(length); // SIZE
+			buf.append(", ");
+			buf.append(createTime); // LAST_MODIFIED_TIME
+			buf.append(", ");
+			buf.append(createTime); // LAST_MODIFIED_TIME
+			buf.append(", '");
+			buf.append(""); // CONTENT
+			buf.append("'");
+			buf.append(")");
+
+			// System.out.println(thisFolderPath + "/" + filename + "\t" + buf.toString());
+
+			c = stat.executeUpdate(buf.toString());
+		} catch (SQLException e) {
+			e.printStackTrace();
+			throw new VirtualFileSystemException("Failed to create file " + filename + " in " + super.thisFolderPath, e);
+		} finally {
+			closeAndCommit(stat);
+
+			if (c == 0) {
+				throw new VirtualFileSystemException("Failed to create file " + filename + " in " + super.thisFolderPath);
+			}
+		}
+	}
+
+	@Override
+	public void newDirectory(String filename) throws VirtualFileSystemException {
+		if (exist(filename, ItemType.Directory)) {
+			return;
+		}
+
+		lastUpdatetime = System.currentTimeMillis();
+
+		int c = 0;
+		Statement stat = null;
+		try {
+			stat = getConnection().createStatement();
+
+			StringBuilder buf = new StringBuilder();
+
+			// System.out.println(super.getId()+" "+fileItem.getPath()+" id="+calcItemId(folderHash, folderLen, fileItem)+">> parent="+parent+"
+			// folderHash="+folderHash+" folderLen="+folderLen+" fileNameHash="+fileItem.getName().toLowerCase().hashCode());
+
+			buf.append("INSERT INTO " + TABLE_NAME + " VALUES(");
+			buf.append("'");
+			buf.append(StringUtils.encodeBase64String(filename)); // FNAME
+			buf.append("', 'D', ");
+			buf.append(0); // SIZE
+			buf.append(", ");
+			buf.append(System.currentTimeMillis()); // LAST_MODIFIED_TIME
+			buf.append(", ");
+			buf.append(System.currentTimeMillis()); // LAST_MODIFIED_TIME
+			buf.append(", '");
+			buf.append(""); // CONTENT
+			buf.append("'");
+			buf.append(")");
+
+			// System.out.println(thisFolderPath + "/" + filename + "\t" + buf.toString());
+
+			c = stat.executeUpdate(buf.toString());
+		} catch (SQLException e) {
+			e.printStackTrace();
+			throw new VirtualFileSystemException("Failed to create folder " + filename + " in " + thisFolderPath, e);
+		} finally {
+			closeAndCommit(stat);
+
+			if (c == 0) {
+				throw new VirtualFileSystemException("Failed to create folder " + filename + " in " + super.thisFolderPath);
+			}
+		}
+	}
+
+	protected void closeAndCommit(Statement stat) {
+		try {
+			if (stat != null) {
+				stat.close();
+			}
+		} catch (SQLException e) {
+			e.printStackTrace();
+		} finally {
+			if (conn != null) {
+				try {
+					conn.commit();
+				} catch (SQLException e) {
+					e.printStackTrace();
+				}
+			}
+			unlock();
+		}
+	}
+
+	protected void close(Statement stat) {
+		try {
+			if (stat != null) {
+				stat.close();
+			}
+		} catch (SQLException e) {
+			e.printStackTrace();
+		} finally {
+			unlock();
+		}
+	}
+
+	@Override
+	public boolean renameTo(String newFoldername) {
+		// this.close();
+		// File dbfile = new File(dblocation + ".mv.db");
+		// String newFolderPath = URLUtils.catPath(thisFolderItem.getParent().getPath(), newFoldername, memFileSystemEntry.getSeparatorChar());
+		// File newdbfile = new File(dbfile.getParent() + File.separator + virtualFileSystem.toDbid(newFolderPath) + ".mv.db");
+		// return dbfile.renameTo(newdbfile);
+		return false;
+	}
+
+	@Override
+	public boolean rename(String filename, String newfilename, ItemType type) throws VirtualFileSystemException {
+		if (StringUtils.isEmpty(newfilename) || StringUtils.isEmpty(filename)) {
+			return false;
+		}
+
+		if (filename.equals(newfilename)) {
+			return true;
+		}
+
+		lastUpdatetime = System.currentTimeMillis();
+
+		Statement stat = null;
+		try {
+			stat = getConnection().createStatement();
+
+			char tp = (type == ItemType.Directory ? 'D' : 'F');
+			String sql = "UPDATE "
+					+ TABLE_NAME
+					+ " SET FNAME='"
+					+ StringUtils.encodeBase64String(newfilename)
+					+ "' WHERE  FTYPE='"
+					+ tp
+					+ "' AND FNAME='"
+					+ StringUtils.encodeBase64String(filename)
+					+ "'";
+
+			int c = stat.executeUpdate(sql);
+
+			if (c == 1) {
+				// 目录重命名后需要关闭数据库变更db名称等
+				if (type == ItemType.Directory) {
+					String folderPath = URLUtils.catPath(thisFolderPath, filename, memFileSystemEntry.getSeparatorChar());
+					VirtualFSI oldFSI = virtualFileSystem.getVirtualFSI(folderPath, ItemType.Directory);
+
+					boolean fsiRenamed = oldFSI.renameTo(newfilename);
+
+					if (fsiRenamed) {
+						virtualFileSystem.removeVirtualFSICache(folderPath);
+						conn.commit();
+						return true;
+					} else {
+						conn.rollback();
+						return false;
+					}
+				} else {
+					conn.commit();
+					// 文件重命名后直接ok
+					return true;
+				}
+			}
+
+			conn.rollback();
+			return false;
+		} catch (SQLException e) {
+			if (e.getMessage().contains("Unique index or primary key violation")) {
+				throw new VirtualFileSystemException("Already has a file named " + newfilename);
+			}
+			throw new VirtualFileSystemException(e);
+		} finally {
+			close(stat);
+		}
+	}
+
+	@Override
+	public void list(ItemHandler handler) throws VirtualFileSystemException {
+		list(handler, null);
+	}
+
+	@Override
+	public void listFolders(ItemHandler handler) throws VirtualFileSystemException {
+		list(handler, ItemType.Directory);
+	}
+
+	private void list(ItemHandler handler, ItemType itemtype) throws VirtualFileSystemException {
+		Statement stat = null;
+		ResultSet result = null;
+		try {
+			String sql = "SELECT * FROM " + TABLE_NAME;
+			if (itemtype == ItemType.Directory) {
+				sql += " WHERE FTYPE='D'";
+			} else if (itemtype == ItemType.File) {
+				sql += " WHERE FTYPE='F'";
+			}
+
+			stat = getConnection().createStatement();
+			result = stat.executeQuery(sql);
+
+			boolean foundRecords = result.next();
+
+			if (!foundRecords) {
+				return;
+			}
+
+			VirtualFileSystemMaster vfs = memFileSystemEntry.getVirtualFileSystem();
+
+			do {
+				// 左侧文件名
+				String fileName = StringUtils.decodeBase64String(result.getString(1));
+				// Type
+				char type = result.getString(2).charAt(0);
+				// 左侧文件创建时间
+				long fileCreateTime = result.getLong(4);
+				// 左侧文件修改时间
+				long fileLastUpdateTime = result.getLong(5);
+
+				// System.out.println(path);
+
+				Item item;
+				if (type == 'D') {
+					String path = URLUtils.catPath(thisFolderPath, fileName, memFileSystemEntry.getSeparatorChar());
+					item = new VirtualFolderItem(memFileSystemEntry, vfs.getVirtualFSI(path, ItemType.Directory));
+				} else {
+					// 左侧文件大小
+					long fileSize = result.getLong(3);
+					// 左侧文件
+					// String fileContentHash = result.getString(6);
+
+					item = new VirtualFileItem(memFileSystemEntry, this, fileName);
+					((ItemInnerFunc) item).setSize(fileSize);
+				}
+
+				((ItemInnerFunc) item).setName(fileName);
+				((ItemInnerFunc) item).setCreateTime(fileCreateTime);
+				((ItemInnerFunc) item).setLastUpdateTime(fileLastUpdateTime);
+
+				HandleFeedback feedback = handler.handle(ItemEvent.ITEM_FOUND, item);
+				if (feedback == HandleFeedback.interrupted) {
+					break;
+				}
+
+			} while (result.next());
+
+			handler.handle(ItemEvent.EXEC_END, null);
+		} catch (Exception e) {
+			e.printStackTrace();
+			throw new VirtualFileSystemException(e);
+		} finally {
+			if (result != null)
+				try {
+					result.close();
+				} catch (SQLException e) {
+				}
+			close(stat);
+		}
+	}
+
+	@Override
+	public String getFolderName() {
+		return thisFolderName;
+	}
+
+	@Override
+	public String getFolderPath() {
+		return thisFolderPath;
+	}
+
+	@Override
+	public boolean exist(String filename, ItemType type) throws VirtualFileSystemException {
+		// if (type == ItemType.Directory && "/".equals(filename)) {
+		// return true;
+		// }
+
+		Statement stat = null;
+		ResultSet result = null;
+		try {
+			char tp = (type == ItemType.Directory ? 'D' : 'F');
+			String sql = "SELECT 1 FROM " + TABLE_NAME + " WHERE FTYPE='" + tp + "' AND FNAME='" + StringUtils.encodeBase64String(filename) + "'";
+
+			stat = getConnection().createStatement();
+			result = stat.executeQuery(sql);
+
+			boolean foundRecords = result.next();
+
+			return foundRecords;
+		} catch (Exception e) {
+			e.printStackTrace();
+			throw new VirtualFileSystemException(e);
+		} finally {
+			if (result != null)
+				try {
+					result.close();
+				} catch (SQLException e) {
+				}
+			close(stat);
+		}
+	}
+
+	@Override
+	public void setFileLength(String filename, long length) throws VirtualFileSystemException {
+		lastUpdatetime = System.currentTimeMillis();
+
+		int c = 0;
+		Statement stat = null;
+		try {
+			stat = getConnection().createStatement();
+
+			String sql = "UPDATE "
+					+ TABLE_NAME
+					+ " SET SIZE="
+					+ length
+					+ ",LAST_MODIFIED_TIME="
+					+ System.currentTimeMillis()
+					+ " WHERE FTYPE='F'"
+					+ " AND FNAME='"
+					+ StringUtils.encodeBase64String(filename)
+					+ "'";
+
+			c = stat.executeUpdate(sql);
+		} catch (SQLException e) {
+			throw new VirtualFileSystemException(e);
+		} finally {
+			closeAndCommit(stat);
+
+			if (c == 0) {
+				this.newFile(filename, length, System.currentTimeMillis());
+			}
+		}
+	}
+
+	@Override
+	public boolean remove() throws VirtualFileSystemException {
+		return removeSubs(this.getFolderItem());
+	}
+
+	protected boolean drop() throws VirtualFileSystemException {
+		Statement stat = null;
+		try {
+			stat = getConnection().createStatement();
+
+			String sql = "DROP TABLE " + TABLE_NAME;
+
+			int c = stat.executeUpdate(sql);
+
+			return c == 1;
+		} catch (SQLException e) {
+			throw new VirtualFileSystemException(e);
+		} finally {
+			closeAndCommit(stat);
+			this.close();
+		}
+	}
+
+	private boolean removeSubs(VirtualFolderItem folder) throws VirtualFileSystemException {
+		final List<VirtualFolderItem> subfolders = new ArrayList<VirtualFolderItem>();
+		folder.getVirtualFSI().listFolders(new ItemHandler() {
+
+			@Override
+			public void exceptionCaught(Item data, Throwable e) {
+			}
+
+			@Override
+			public HandleFeedback handle(Integer meta, Item obj) {
+				if (obj != null) {
+					VirtualFolderItem subfolder = (VirtualFolderItem) obj;
+					// subfolders.add(subfolder);
+					try {
+						if (!removeSubs(subfolder)) {
+							return HandleFeedback.interrupted;
+						}
+					} catch (VirtualFileSystemException e) {
+						e.printStackTrace();
+					}
+				}
+				return null;
+			}
+		});
+
+		int c = 0;
+		for (VirtualFolderItem virtualFolderItem : subfolders) {
+			System.out.println("-Debug- delete folder " + folder.getPath());
+			if (((JdbcVirtualFSI2) virtualFolderItem.getVirtualFSI()).drop()) {
+				c++;
+			}
+		}
+		return c == subfolders.size();
+		// return folder.delete();
+		// System.out.println("-Debug- delete folder "+folder.getPath());
+		// return ((JdbcVirtualFSI)folder.getVirtualFSI()).drop();
+	}
+
+	public void write(String filename, String content) throws VirtualFileSystemException {
+		lastUpdatetime = System.currentTimeMillis();
+
+		Statement stat = null;
+		try {
+			stat = getConnection().createStatement();
+
+			String sql = "UPDATE "
+					+ TABLE_NAME
+					+ " SET CONTENT='"
+					+ StringUtils.encodeBase64String(content)
+					+ "', LAST_MODIFIED_TIME="
+					+ System.currentTimeMillis()
+					+ " WHERE  FTYPE='F'"
+					+ " AND FNAME='"
+					+ StringUtils.encodeBase64String(filename)
+					+ "'";
+
+			int c = stat.executeUpdate(sql);
+		} catch (SQLException e) {
+			throw new VirtualFileSystemException(e);
+		} finally {
+			closeAndCommit(stat);
+		}
+	}
+
+	@Override
+	public String read(String filename) throws VirtualFileSystemException {
+		Statement stat = null;
+		ResultSet result = null;
+		try {
+			String sql = "SELECT CONTENT FROM " + TABLE_NAME + " WHERE  FTYPE='F'" + " AND FNAME='" + StringUtils.encodeBase64String(filename) + "'";
+
+			stat = getConnection().createStatement();
+			result = stat.executeQuery(sql);
+
+			boolean foundRecords = result.next();
+
+			if (!foundRecords) {
+				return null;
+			}
+
+			String val = result.getString(1);
+			return StringUtils.decodeBase64String(val);
+		} catch (Exception e) {
+			e.printStackTrace();
+			throw new VirtualFileSystemException(e);
+		} finally {
+			if (result != null)
+				try {
+					result.close();
+				} catch (SQLException e) {
+				}
+			close(stat);
+		}
+	}
+
+	// @Override
+	// public Object getAttribute(String filename, String attrname) throws VirtualFileSystemException {
+	// // Statement stat = null;
+	// // ResultSet result = null;
+	// // try {
+	// // String sql = "SELECT " + attrname + " FROM " + TABLE_NAME + " WHERE FTYPE='F'" + " AND FNAME='" +
+	// // StringUtils.encodeBase64String(filename) + "'";
+	// //
+	// // stat = getConnection().createStatement();
+	// // result = stat.executeQuery(sql);
+	// //
+	// // boolean foundRecords = result.next();
+	// //
+	// // if (!foundRecords) {
+	// // return null;
+	// // }
+	// //
+	// // Object val = result.getObject(1);
+	// // return val;
+	// // } catch (Exception e) {
+	// // e.printStackTrace();
+	// // throw new VirtualFileSystemException(e);
+	// // } finally {
+	// // if (result != null)
+	// // try {
+	// // result.close();
+	// // } catch (SQLException e) {
+	// // }
+	// // if (stat != null)
+	// // try {
+	// // stat.close();
+	// // } catch (SQLException e) {
+	// // }
+	// // }
+	// return null;
+	// }
+
+	@Override
+	public Long[] getSystemAttribute(String filename, ItemType type) throws VirtualFileSystemException {
+		Statement stat = null;
+		ResultSet result = null;
+		try {
+			char tp = (type == ItemType.Directory ? 'D' : 'F');
+			String sql = "SELECT SIZE, CREATION_TIME, LAST_MODIFIED_TIME FROM "
+					+ TABLE_NAME
+					+ " WHERE  FTYPE='"
+					+ tp
+					+ "'"
+					+ " AND FNAME='"
+					+ StringUtils.encodeBase64String(filename)
+					+ "'";
+
+			stat = getConnection().createStatement();
+			result = stat.executeQuery(sql);
+
+			boolean foundRecords = result.next();
+
+			if (!foundRecords) {
+				return null;
+			}
+
+			Long size = result.getLong(1);
+			Long createTime = result.getLong(2);
+			Long lastModifiedTime = result.getLong(3);
+			return new Long[] { size, createTime, lastModifiedTime };
+		} catch (Exception e) {
+			e.printStackTrace();
+			throw new VirtualFileSystemException(e);
+		} finally {
+			if (result != null)
+				try {
+					result.close();
+				} catch (SQLException e) {
+				}
+			close(stat);
+		}
+	}
+
+}
